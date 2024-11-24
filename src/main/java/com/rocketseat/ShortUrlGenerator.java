@@ -10,14 +10,13 @@ import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
 @SuppressWarnings("unused")
-public class Main implements RequestHandler<Map<String, Object>, Map<String, String>> {
+public class ShortUrlGenerator implements RequestHandler<Map<String, Object>, Map<String, String>> {
     private static final int SHORT_URL_LENGTH = 8;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -27,72 +26,51 @@ public class Main implements RequestHandler<Map<String, Object>, Map<String, Str
     public Map<String, String> handleRequest(Map<String, Object> input, Context context) {
         String body = input.get("body").toString();
         if (body == null || body.isBlank()) {
-            return createResponse("error", "Request body cannot be empty.");
+            throw new IllegalArgumentException("Request body cannot be empty.");
         }
 
-        Map<String, String> bodyMap = parseJsonBody(body);
-
-        ObjectNode urlData = createUrlData(bodyMap);
-
-        String shortUrlCode = generateShortUrlCode();
-
-        saveUrlDataToS3(urlData, shortUrlCode, context);
-
-        return createResponse("code", shortUrlCode);
-    }
-
-    private Map<String, String> parseJsonBody(String body) {
+        Map<String, String> bodyMap;
         try {
-            return objectMapper.readValue(body, new TypeReference<>() {});
+            bodyMap = objectMapper.readValue(body, new TypeReference<>() {});
         } catch (JsonProcessingException e) {
-            return createResponse("error", "Error parsing JSON body: " + e.getMessage());
+            throw new IllegalArgumentException("Invalid JSON body: " + e.getMessage(), e);
         }
-    }
 
-    private boolean validateRequiredFields(String originalUrl, String expirationTime) {
-        return originalUrl != null && !originalUrl.isBlank() && expirationTime != null && !expirationTime.isBlank();
-    }
-
-    private String generateShortUrlCode() {
-        return UUID.randomUUID().toString().substring(0, SHORT_URL_LENGTH);
-    }
-
-    private ObjectNode createUrlData(Map<String, String> bodyMap) {
         String originalUrl = bodyMap.get("originalUrl");
         String expirationTime = bodyMap.get("expirationTime");
+        long expirationTimeInSeconds = Long.parseLong(expirationTime);
 
-        if (!validateRequiredFields(originalUrl, expirationTime)) {
-            throw new IllegalArgumentException("Missing required fields.");
+        if (originalUrl == null || originalUrl.isBlank()) {
+            throw new IllegalArgumentException("Missing required field: originalUrl.");
         }
 
-        ObjectNode urlData = objectMapper.createObjectNode();
-        urlData.put("originalUrl", originalUrl);
-        urlData.put("expirationTime", Long.parseLong(expirationTime));
-        return urlData;
-    }
+        if (expirationTimeInSeconds <= 0) {
+            throw new IllegalArgumentException("Invalid value for expirationTime.");
+        }
 
-    private void saveUrlDataToS3(ObjectNode urlData, String key, Context context) {
+        String shortUrlCode = UUID.randomUUID().toString().substring(0, SHORT_URL_LENGTH);
+
         try {
+            UrlData urlData = new UrlData(originalUrl, expirationTimeInSeconds);
             String urlDataJson = objectMapper.writeValueAsString(urlData);
             String bucketName = System.getenv("S3_BUCKET_NAME");
 
             PutObjectRequest request = PutObjectRequest.builder()
                 .bucket(bucketName)
-                .key(key + ".json")
+                .key(shortUrlCode + ".json")
                 .build();
 
             s3Client.putObject(request, RequestBody.fromString(urlDataJson));
-            context.getLogger().log("Successfully stored URL data with code: " + key);
+            context.getLogger().log("Successfully stored URL data with code: " + shortUrlCode);
         } catch (Exception exception) {
             String error = "Error saving data to S3: " + exception.getMessage();
             context.getLogger().log(error);
             throw new RuntimeException(error, exception);
         }
-    }
 
-    private Map<String, String> createResponse(String key, String value) {
         Map<String, String> response = new HashMap<>();
-        response.put(key, value);
+        response.put("code", shortUrlCode);
+
         return response;
     }
 }
